@@ -764,6 +764,109 @@ class ApplyInstantIDControlNet:
         return (cond_uncond[0], cond_uncond[1])
 
 
+class CreateKPSImage:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "kps": ("STRING", {"multiline": True}),
+                "image_width": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 1}),
+                "image_height": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 1}),
+                "target_size_perc": ("FLOAT", {"default": 0.22, "min": 0.01, "max": 1.0, "step": 0.01}),
+                "y_perc": ("FLOAT", {"default": -0.03, "min": -0.5, "max": 0.5, "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "create_kps_image"
+    CATEGORY = "InstantID"
+
+    def create_kps_image(self, kps, image_width=1024, image_height=1024, target_size_perc=0.22, y_perc=-0.03):
+        # Convert string to keypoints array
+        kps_array = ast.literal_eval(kps)
+        kps_array = np.array(kps_array, dtype=np.float32)
+
+        # RGB colors that will display correctly
+        color_list = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)]
+
+        stickwidth = 4
+        limbSeq = np.array([[0, 2], [1, 2], [3, 2], [4, 2]])
+
+        # Set output canvas dimensions
+        h, w = image_height, image_width
+
+        # Normalize keypoints to take consistent area on canvas
+        if kps_array.size > 0:
+            x_coords = kps_array[:, 0]
+            y_coords = kps_array[:, 1]
+
+            # Calculate current bounding box
+            x_min, x_max = float(np.min(x_coords)), float(np.max(x_coords))
+            y_min, y_max = float(np.min(y_coords)), float(np.max(y_coords))
+
+            # Current dimensions
+            current_width = x_max - x_min
+            current_height = y_max - y_min
+
+            # Target area: use target_size_perc of canvas for consistent sizing
+            target_size = min(w, h) * target_size_perc
+
+            # Calculate scale factor to achieve target size
+            if current_width > 0 and current_height > 0:
+                current_max_dim = max(current_width, current_height)
+                scale = target_size / current_max_dim
+            else:
+                scale = 1.0
+
+            # Get center of current bounding box
+            cx = (x_min + x_max) / 2.0
+            cy = (y_min + y_max) / 2.0
+
+            # Normalize: center at origin, scale, then move to canvas center
+            kps_centered = kps_array - np.array([cx, cy], dtype=np.float32)
+            kps_scaled = kps_centered * scale
+            # Adjusting the y-coordinate based on y_perc
+            canvas_center = np.array([w / 2.0, h / 2.0 - h * y_perc], dtype=np.float32)
+            kps_array = kps_scaled + canvas_center
+
+        # Create RGB image (not BGR)
+        out_img = np.zeros((h, w, 3), dtype=np.uint8)
+
+        # Draw limbs
+        for i in range(len(limbSeq)):
+            index = limbSeq[i]
+            color = color_list[index[0]]
+
+            x = kps_array[index][:, 0]
+            y = kps_array[index][:, 1]
+            length = ((x[0] - x[1]) ** 2 + (y[0] - y[1]) ** 2) ** 0.5
+            angle = math.degrees(math.atan2(y[0] - y[1], x[0] - x[1]))
+            polygon = cv2.ellipse2Poly((int(np.mean(x)), int(np.mean(y))), (int(length / 2), stickwidth), int(angle), 0,
+                                       360, 1)
+            # Convert RGB to BGR for OpenCV operations
+            bgr_color = (color[2], color[1], color[0])
+            out_img = cv2.fillConvexPoly(out_img.copy(), polygon, bgr_color)
+
+        out_img = (out_img * 0.6).astype(np.uint8)
+
+        # Draw keypoints
+        for idx_kp, kp in enumerate(kps_array):
+            color = color_list[idx_kp % len(color_list)]
+            x, y = kp
+            # Convert RGB to BGR for OpenCV operations
+            bgr_color = (color[2], color[1], color[0])
+            out_img = cv2.circle(out_img.copy(), (int(x), int(y)), 10, bgr_color, -1)
+
+        # Convert BGR back to RGB for PIL
+        out_img_rgb = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
+
+        # Convert to tensor format expected by ComfyUI (BHWC format)
+        out_img_tensor = torch.from_numpy(out_img_rgb).float() / 255.0
+        out_img_tensor = out_img_tensor.unsqueeze(0)  # Add batch dimension
+
+        return (out_img_tensor,)
+
+
 NODE_CLASS_MAPPINGS = {
     "ApplyInstantIDFromEmbed": ApplyInstantIDFromEmbed,
     "InstantIDModelLoader": InstantIDModelLoader,
@@ -774,6 +877,7 @@ NODE_CLASS_MAPPINGS = {
 
     "InstantIDAttentionPatch": InstantIDAttentionPatch,
     "ApplyInstantIDControlNet": ApplyInstantIDControlNet,
+    "CreateKPSImage": CreateKPSImage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -786,4 +890,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
     "InstantIDAttentionPatch": "InstantID Patch Attention",
     "ApplyInstantIDControlNet": "InstantID Apply ControlNet",
+    "CreateKPSImage": "Create KPS Image",
 }
